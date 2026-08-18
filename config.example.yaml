@@ -1,0 +1,29 @@
+app:
+  name: wechat-auto-reply
+
+bridge:
+  # hermes-wxauto bridge-server must be running separately.
+  url: http://127.0.0.1:8765
+  poll_timeout_seconds: 30
+  poll_limit: 1
+  request_timeout_seconds: 10
+  retry_delay_seconds: 5
+
+database:
+  path: ./data/auto-reply.sqlite3
+
+logging:
+  level: INFO
+  file_path: ./data/logs/auto-reply.log
+  max_bytes: 10485760
+  backup_count: 3
+
+context:
+  recent_message_limit: 20
+
+llm:
+  # Intentionally disabled in phase 1. No model request is made yet.
+  enabled: false
+  base_url: http://127.0.0.1:8080/v1
+  model: qwen3.5-9b
+  timeout_seconds: 120

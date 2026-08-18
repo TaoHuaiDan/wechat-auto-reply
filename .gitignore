@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.test-run/
+.coverage
+htmlcov/
+
+# Local configuration and runtime data.
+config.yaml
+data/*
+!data/.gitkeep
+*.log
+
+# Local hermes-wxauto checkout, if kept beside this project.
+hermes-wxauto/

@@ -1,0 +1,518 @@
+diff --git a/src/my_wxauto/bridge_server.py b/src/my_wxauto/bridge_server.py
+index 36ac7d8..ab155b3 100644
+--- a/src/my_wxauto/bridge_server.py
++++ b/src/my_wxauto/bridge_server.py
+@@ -37,6 +37,7 @@ class BridgeServerConfig:
+     resolve_senders: bool | str = False
+     sender_resolve_limit: int = 5
+     prefer_wxauto4: bool = True
++    allow_window_activation: bool = True
+     debug: bool = False
+     trace_ui: bool = False
+
+@@ -133,16 +134,18 @@ class BridgeRuntime:
+             self._listener_thread.start()
+
+     def _listener_target(self) -> None:
+-        self.wechat.listen_conversation_batches(
+-            self.enqueue_batch,
+-            interval=self.config.listen_interval,
+-            max_chats_per_drain=self.config.max_chats_per_drain,
+-            store_path=self.config.store_path,
+-            resolve_senders=self.config.resolve_senders,
+-            sender_resolve_limit=self.config.sender_resolve_limit,
+-            ui_lock=self.ui_lock,
+-            mark_submitted_on_callback=False,
+-        )
++        listener_kwargs: dict[str, Any] = {
++            "interval": self.config.listen_interval,
++            "max_chats_per_drain": self.config.max_chats_per_drain,
++            "store_path": self.config.store_path,
++            "resolve_senders": self.config.resolve_senders,
++            "sender_resolve_limit": self.config.sender_resolve_limit,
++            "ui_lock": self.ui_lock,
++            "mark_submitted_on_callback": False,
++        }
++        if not self.config.allow_window_activation:
++            listener_kwargs["allow_window_activation"] = False
++        self.wechat.listen_conversation_batches(self.enqueue_batch, **listener_kwargs)
+
+     def _append_persisted_pending_events(
+         self,
+diff --git a/src/my_wxauto/cli.py b/src/my_wxauto/cli.py
+index 0259fc2..35f773f 100644
+--- a/src/my_wxauto/cli.py
++++ b/src/my_wxauto/cli.py
+@@ -52,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
+     parser.add_argument("--listen-sender-limit", type=int, default=5, help="每个会话最多解析的发送人数")
+     parser.add_argument("--use-wxauto4", dest="use_wxauto4", action="store_true", default=True, help="默认开启：使用 wxauto4 构造器恢复/置前微信窗口")
+     parser.add_argument("--no-wxauto4", dest="use_wxauto4", action="store_false", help="不使用 wxauto4 构造器，直接走窗口控制器")
++    parser.add_argument(
++        "--no-foreground",
++        dest="allow_window_activation",
++        action="store_false",
++        default=True,
++        help="监听时不恢复、不激活、不置前微信窗口；普通打开聊天/发送消息路径不受影响",
++    )
+     parser.add_argument("--click-search-box", action="store_true", help="使用坐标点击左上角搜索框")
+     parser.add_argument("--no-click", action="store_true", help=argparse.SUPPRESS)
+     parser.add_argument("--no-shortcut", action="store_true", help="不使用搜索快捷键")
+@@ -87,20 +94,21 @@ def _run(args: argparse.Namespace) -> int:
+         print(json.dumps(controller.diagnose(), ensure_ascii=False, indent=2))
+         return 0
+     if args.bridge_server:
+-        run_bridge_server(
+-            BridgeServerConfig(
+-                host=args.bridge_host,
+-                port=args.bridge_port,
+-                store_path=args.store_path,
+-                queue_size=args.bridge_queue_size,
+-                max_chats_per_drain=args.listen_max_chats,
+-                resolve_senders=_listener_sender_mode(args.listen_resolve_senders),
+-                sender_resolve_limit=args.listen_sender_limit,
+-                prefer_wxauto4=args.use_wxauto4,
+-                debug=args.debug,
+-                trace_ui=args.trace_ui,
+-            )
+-        )
++        bridge_kwargs: dict[str, object] = {
++            "host": args.bridge_host,
++            "port": args.bridge_port,
++            "store_path": args.store_path,
++            "queue_size": args.bridge_queue_size,
++            "max_chats_per_drain": args.listen_max_chats,
++            "resolve_senders": _listener_sender_mode(args.listen_resolve_senders),
++            "sender_resolve_limit": args.listen_sender_limit,
++            "prefer_wxauto4": args.use_wxauto4,
++            "debug": args.debug,
++            "trace_ui": args.trace_ui,
++        }
++        if not args.allow_window_activation:
++            bridge_kwargs["allow_window_activation"] = False
++        run_bridge_server(BridgeServerConfig(**bridge_kwargs))
+         return 0
+     if args.probe_listener_signals:
+         from .probes import probe_listener_signals
+@@ -138,16 +146,21 @@ def _run(args: argparse.Namespace) -> int:
+     if args.watch_wakeup > 0:
+         from .probes import watch_unread_wakeup
+
++        wakeup_kwargs: dict[str, object] = {
++            "seconds": args.watch_wakeup,
++            "interval": args.probe_interval,
++            "max_controls": args.probe_max_controls,
++            "min_changes": args.wakeup_burst_changes,
++            "window_seconds": args.wakeup_burst_window,
++            "cooldown_seconds": args.wakeup_cooldown,
++            "action_timeout": args.wakeup_action_timeout,
++            "max_probes": args.wakeup_max_probes,
++            "open_unread_messages": args.wakeup_open_unread,
++        }
++        if not args.allow_window_activation:
++            wakeup_kwargs["allow_window_activation"] = False
+         watch_unread_wakeup(
+-            seconds=args.watch_wakeup,
+-            interval=args.probe_interval,
+-            max_controls=args.probe_max_controls,
+-            min_changes=args.wakeup_burst_changes,
+-            window_seconds=args.wakeup_burst_window,
+-            cooldown_seconds=args.wakeup_cooldown,
+-            action_timeout=args.wakeup_action_timeout,
+-            max_probes=args.wakeup_max_probes,
+-            open_unread_messages=args.wakeup_open_unread,
++            **wakeup_kwargs,
+         )
+         return 0
+     if args.listen_batches:
+@@ -157,16 +170,18 @@ def _run(args: argparse.Namespace) -> int:
+             prefer_wxauto4=args.use_wxauto4,
+             bridge_store_path=args.store_path,
+         )
+-        stats = wx.listen_conversation_batches(
+-            _print_conversation_batch_debug,
+-            seconds=args.listen_seconds,
+-            max_events=args.listen_max_events,
+-            max_probes=args.listen_max_probes,
+-            max_chats_per_drain=args.listen_max_chats,
+-            store_path=args.store_path,
+-            resolve_senders=_listener_sender_mode(args.listen_resolve_senders),
+-            sender_resolve_limit=args.listen_sender_limit,
+-        )
++        listener_kwargs: dict[str, object] = {
++            "seconds": args.listen_seconds,
++            "max_events": args.listen_max_events,
++            "max_probes": args.listen_max_probes,
++            "max_chats_per_drain": args.listen_max_chats,
++            "store_path": args.store_path,
++            "resolve_senders": _listener_sender_mode(args.listen_resolve_senders),
++            "sender_resolve_limit": args.listen_sender_limit,
++        }
++        if not args.allow_window_activation:
++            listener_kwargs["allow_window_activation"] = False
++        stats = wx.listen_conversation_batches(_print_conversation_batch_debug, **listener_kwargs)
+         _print_listener_stats(stats)
+         return 0
+     if not args.who:
+diff --git a/src/my_wxauto/listener.py b/src/my_wxauto/listener.py
+index 1e48f5f..f980672 100644
+--- a/src/my_wxauto/listener.py
++++ b/src/my_wxauto/listener.py
+@@ -119,6 +119,7 @@ def listen_new_messages(
+     action_timeout: float = 15.0,
+     max_events: int = 0,
+     max_probes: int = 0,
++    allow_window_activation: bool = True,
+ ) -> ListenerStats:
+     """Listen for new WeChat messages and call callback with visible chat data.
+
+@@ -144,11 +145,16 @@ def listen_new_messages(
+         flash = detector.observe(time.monotonic(), probes._taskbar_signature(icons))
+         if flash is not None:
+             flash_count += 1
++            probe_kwargs: dict[str, Any] = {
++                "max_controls": max_controls,
++                "timeout": action_timeout,
++                "restore_icons": icons,
++                "open_unread_messages": True,
++            }
++            if not allow_window_activation:
++                probe_kwargs["allow_window_activation"] = False
+             payload = probes._probe_sessions_after_wakeup_with_timeout(
+-                max_controls=max_controls,
+-                timeout=action_timeout,
+-                restore_icons=icons,
+-                open_unread_messages=True,
++                **probe_kwargs,
+             )
+             if str(payload.get("status") or "ok") == "ok":
+                 for event in _events_from_probe(payload, flash_index=flash_count):
+@@ -188,6 +194,7 @@ def listen_conversation_batches(
+     sender_progress: Callable[[dict[str, Any]], None] | None = None,
+     ui_lock: Any | None = None,
+     mark_submitted_on_callback: bool = True,
++    allow_window_activation: bool = True,
+ ) -> ListenerStats:
+     """Listen for unread chats and synchronously deliver frozen batches.
+
+@@ -298,14 +305,19 @@ def listen_conversation_batches(
+
+                     probe_on_chat_opened = emit_after_opened_without_ui_lock
+
++                probe_kwargs: dict[str, Any] = {
++                    "max_controls": max_controls,
++                    "timeout": action_timeout,
++                    "restore_icons": icons,
++                    "open_unread_messages": True,
++                    "max_unread_chats": effective_max_chats_per_drain,
++                    "max_ui_busy_seconds": max_ui_busy_seconds,
++                    "on_chat_opened": probe_on_chat_opened,
++                }
++                if not allow_window_activation:
++                    probe_kwargs["allow_window_activation"] = False
+                 probes._probe_sessions_after_wakeup_with_timeout(
+-                    max_controls=max_controls,
+-                    timeout=action_timeout,
+-                    restore_icons=icons,
+-                    open_unread_messages=True,
+-                    max_unread_chats=effective_max_chats_per_drain,
+-                    max_ui_busy_seconds=max_ui_busy_seconds,
+-                    on_chat_opened=probe_on_chat_opened,
++                    **probe_kwargs,
+                 )
+         finally:
+             listener_ui_lock.release()
+diff --git a/src/my_wxauto/probes.py b/src/my_wxauto/probes.py
+index d41a171..dc44a90 100644
+--- a/src/my_wxauto/probes.py
++++ b/src/my_wxauto/probes.py
+@@ -152,6 +152,7 @@ def watch_taskbar_icons(*, seconds: float, interval: float = 0.25) -> None:
+     exact control changed.
+     """
+
++    _ensure_windows()
+     deadline = time.monotonic() + seconds
+     last_signature: tuple[Any, ...] | None = None
+     while time.monotonic() < deadline:
+@@ -182,6 +183,7 @@ def watch_unread_wakeup(
+     action_timeout: float = 12.0,
+     max_probes: int = 1,
+     open_unread_messages: bool = False,
++    allow_window_activation: bool = True,
+ ) -> None:
+     """Watch taskbar/tray flashing, then restore WeChat and dump unread sessions."""
+
+@@ -222,18 +224,23 @@ def watch_unread_wakeup(
+                     }
+                 )
+                 _emit_wakeup({"status": "probe_started", "flash_index": flash_count})
+-                sessions = _probe_sessions_after_wakeup_with_timeout(
+-                    max_controls=max_controls,
+-                    timeout=action_timeout,
+-                    restore_icons=icons,
+-                    open_unread_messages=open_unread_messages,
+-                    on_progress=lambda progress: _emit_wakeup(
++                probe_kwargs: dict[str, Any] = {
++                    "max_controls": max_controls,
++                    "timeout": action_timeout,
++                    "restore_icons": icons,
++                    "open_unread_messages": open_unread_messages,
++                    "on_progress": lambda progress: _emit_wakeup(
+                         {
+                             "status": "probe_progress",
+                             "flash_index": flash_count,
+                             **progress,
+                         }
+                     ),
++                }
++                if not allow_window_activation:
++                    probe_kwargs["allow_window_activation"] = False
++                sessions = _probe_sessions_after_wakeup_with_timeout(
++                    **probe_kwargs,
+                 )
+                 probe_status = str(sessions.get("status") or "ok")
+                 session_payload = {key: value for key, value in sessions.items() if key != "status"}
+@@ -299,6 +306,7 @@ def _probe_sessions_after_wakeup(
+     max_controls: int,
+     restore_icons: list[dict[str, Any]] | None = None,
+     open_unread_messages: bool = False,
++    allow_window_activation: bool = True,
+     max_unread_chats: int = 1,
+     max_ui_busy_seconds: float = 15.0,
+     on_chat_opened: Callable[[dict[str, Any]], None] | None = None,
+@@ -311,28 +319,36 @@ def _probe_sessions_after_wakeup(
+     started = time.perf_counter()
+     progress("find_window.before")
+     controller = WeChatWindowController(prefer_tray_restore=False)
+-    window = controller.find_main_window(reveal=True)
++    window = controller.find_main_window(reveal=allow_window_activation)
+     progress("find_window.after", {"window": _window_to_dict(window)})
+-    if not window.visible and not window.minimized:
+-        progress("activate.strategy", {"strategy": "ctrl_alt_w_restore"})
+-        progress("ctrl_alt_w.before", {"hwnd": window.hwnd})
+-        _send_wechat_toggle_hotkey()
+-        progress("ctrl_alt_w.after")
+-        visible_window = _wait_for_visible_window_after_reveal(controller, window)
+-        progress(
+-            "ctrl_alt_w.visible_window",
+-            {"window": _window_to_dict(visible_window) if visible_window is not None else None},
+-        )
+-        if visible_window is None:
+-            raise RuntimeError("Ctrl+Alt+W did not restore the hidden WeChat window.")
+-        window = visible_window
++    if allow_window_activation:
++        if not window.visible and not window.minimized:
++            progress("activate.strategy", {"strategy": "ctrl_alt_w_restore"})
++            progress("ctrl_alt_w.before", {"hwnd": window.hwnd})
++            _send_wechat_toggle_hotkey()
++            progress("ctrl_alt_w.after")
++            visible_window = _wait_for_visible_window_after_reveal(controller, window)
++            progress(
++                "ctrl_alt_w.visible_window",
++                {"window": _window_to_dict(visible_window) if visible_window is not None else None},
++            )
++            if visible_window is None:
++                raise RuntimeError("Ctrl+Alt+W did not restore the hidden WeChat window.")
++            window = visible_window
++        else:
++            progress("activate.strategy", {"strategy": "win32_restore"})
++        progress("activate.before", {"hwnd": window.hwnd})
++        activated = controller.activate(window, wait=0.35)
++        progress("activate.after", {"window": _window_to_dict(activated)})
++        ready = controller.wait_until_ready(activated, timeout=5.0, stable_for=0.3)
+     else:
+-        progress("activate.strategy", {"strategy": "win32_restore"})
+-    progress("activate.before", {"hwnd": window.hwnd})
+-    activated = controller.activate(window, wait=0.35)
+-    progress("activate.after", {"window": _window_to_dict(activated)})
+-    progress("wait_ready.before", {"hwnd": activated.hwnd})
+-    ready = controller.wait_until_ready(activated, timeout=5.0, stable_for=0.3)
++        if not _is_visible_normal_window(window):
++            raise RuntimeError(
++                "Background-only listener will not reveal or restore WeChat; "
++                "the existing WeChat window must already be visible and not minimized."
++            )
++        progress("activate.skipped", {"reason": "background_only", "hwnd": window.hwnd})
++        ready = controller.wait_until_ready(window, timeout=5.0, stable_for=0.3)
+     progress("wait_ready.after", {"window": _window_to_dict(ready)})
+     region = _session_list_region(ready)
+     progress("collect_uia.before", {"session_region": _rect_to_dict(region), "max_controls": max_controls})
+@@ -361,6 +377,7 @@ def _probe_sessions_after_wakeup(
+             max_controls=max_controls,
+             max_unread_chats=max_unread_chats,
+             max_ui_busy_seconds=max_ui_busy_seconds,
++            background_click=not allow_window_activation,
+             on_chat_opened=on_chat_opened,
+             report_progress=progress,
+         )
+@@ -408,6 +425,7 @@ def _open_unread_sessions_and_collect_messages(
+     max_controls: int,
+     max_unread_chats: int = 1,
+     max_ui_busy_seconds: float = 15.0,
++    background_click: bool = False,
+     on_chat_opened: Callable[[dict[str, Any]], None] | None = None,
+     report_progress: Callable[[str, dict[str, Any] | None], None] | None = None,
+ ) -> list[dict[str, Any]]:
+@@ -454,7 +472,10 @@ def _open_unread_sessions_and_collect_messages(
+             if on_chat_opened is not None:
+                 on_chat_opened(opened_chat)
+             continue
+-        _click_point(click_point)
++        if background_click:
++            _post_click_point(window.hwnd, click_point)
++        else:
++            _click_point(click_point)
+         time.sleep(0.5)
+         if report_progress is not None:
+             report_progress("open_unread.after", {"index": index, "chat_name": chat_name, "source": source})
+@@ -541,6 +562,27 @@ def _click_point(point: tuple[int, int]) -> None:
+     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, x, y, 0, 0)
+
+
++def _post_click_point(window_hwnd: int, point: tuple[int, int]) -> None:
++    """Click a listener target without moving the real cursor or activating WeChat."""
++
++    import win32con
++    import win32gui
++
++    target_hwnd = win32gui.WindowFromPoint(point)
++    if (
++        not target_hwnd
++        or not win32gui.IsWindow(target_hwnd)
++        or (target_hwnd != window_hwnd and not win32gui.IsChild(window_hwnd, target_hwnd))
++    ):
++        target_hwnd = window_hwnd
++    client_x, client_y = win32gui.ScreenToClient(target_hwnd, point)
++    lparam = ((int(client_y) & 0xFFFF) << 16) | (int(client_x) & 0xFFFF)
++    win32gui.PostMessage(target_hwnd, win32con.WM_MOUSEMOVE, 0, lparam)
++    win32gui.PostMessage(target_hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
++    time.sleep(0.04)
++    win32gui.PostMessage(target_hwnd, win32con.WM_LBUTTONUP, 0, lparam)
++
++
+ def _chat_message_region(window: WeChatWindow) -> WindowRect:
+     left = window.rect.left + min(max(window.rect.width // 3, 280), max(280, window.rect.width - 360))
+     header = min(max(window.rect.height // 12, 72), 120)
+@@ -737,6 +779,7 @@ def _probe_sessions_after_wakeup_with_timeout(
+     timeout: float,
+     restore_icons: list[dict[str, Any]] | None = None,
+     open_unread_messages: bool = False,
++    allow_window_activation: bool = True,
+     max_unread_chats: int = 1,
+     max_ui_busy_seconds: float = 15.0,
+     on_chat_opened: Callable[[dict[str, Any]], None] | None = None,
+@@ -745,16 +788,19 @@ def _probe_sessions_after_wakeup_with_timeout(
+     started = time.perf_counter()
+     context = mp.get_context("spawn")
+     result_queue: mp.Queue[dict[str, Any]] = context.Queue(maxsize=1)
++    worker_args: list[Any] = [
++        result_queue,
++        max_controls,
++        restore_icons,
++        open_unread_messages,
++        max_unread_chats,
++        max_ui_busy_seconds,
++    ]
++    if not allow_window_activation:
++        worker_args.append(False)
+     process = context.Process(
+         target=_probe_sessions_after_wakeup_worker,
+-        args=(
+-            result_queue,
+-            max_controls,
+-            restore_icons,
+-            open_unread_messages,
+-            max_unread_chats,
+-            max_ui_busy_seconds,
+-        ),
++        args=tuple(worker_args),
+     )
+     process.daemon = True
+     process.start()
+@@ -829,6 +875,7 @@ def _probe_sessions_after_wakeup_worker(
+     open_unread_messages: bool,
+     max_unread_chats: int,
+     max_ui_busy_seconds: float,
++    allow_window_activation: bool = True,
+ ) -> None:
+     def report_progress(stage: str, extra: dict[str, Any] | None = None) -> None:
+         result_queue.put({"status": "progress", "stage": stage, **(extra or {})})
+@@ -842,6 +889,7 @@ def _probe_sessions_after_wakeup_worker(
+                     max_controls=max_controls,
+                     restore_icons=restore_icons,
+                     open_unread_messages=open_unread_messages,
++                    allow_window_activation=allow_window_activation,
+                     max_unread_chats=max_unread_chats,
+                     max_ui_busy_seconds=max_ui_busy_seconds,
+                     report_progress=report_progress,
+@@ -1417,3 +1465,9 @@ def _contains_any(value: str, keywords: Iterable[str]) -> bool:
+ def _ensure_windows() -> None:
+     if platform.system() != "Windows":
+         raise OSError("my_wxauto 诊断探针目前只支持 Windows。")
++    try:
++        ctypes.windll.user32.SetProcessDPIAware()
++    except Exception:
++        # The probe can still operate with the process default if Windows
++        # refuses to change DPI awareness after startup.
++        pass
+diff --git a/tests/test_probes.py b/tests/test_probes.py
+index f96da16..26dd069 100644
+--- a/tests/test_probes.py
++++ b/tests/test_probes.py
+@@ -198,6 +198,57 @@ def test_probe_sessions_after_wakeup_uses_direct_win32_restore(monkeypatch) -> N
+     assert result["sessions"] == []
+
+
++def test_probe_sessions_after_wakeup_can_skip_window_activation(monkeypatch) -> None:
++    events: list[str] = []
++    visible = WeChatWindow(
++        hwnd=100,
++        title="WeChat",
++        class_name="Qt51514QWindowIcon",
++        pid=42,
++        process_name="Weixin.exe",
++        exe=r"C:\Program Files\Tencent\Weixin\Weixin.exe",
++        rect=WindowRect(10, 20, 900, 700),
++        visible=True,
++        minimized=False,
++    )
++
++    class FakeController:
++        def __init__(self, **kwargs: object) -> None:
++            pass
++
++        def find_main_window(self, reveal: bool = True) -> WeChatWindow:
++            assert reveal is False
++            events.append("find")
++            return visible
++
++        def activate(self, target: WeChatWindow, wait: float = 0.35) -> WeChatWindow:
++            raise AssertionError("background-only probe must not activate WeChat")
++
++        def wait_until_ready(
++            self,
++            target: WeChatWindow,
++            *,
++            timeout: float,
++            stable_for: float,
++        ) -> WeChatWindow:
++            assert target is visible
++            events.append("wait")
++            return visible
++
++    monkeypatch.setattr(probes, "WeChatWindowController", FakeController)
++    monkeypatch.setattr(probes, "_collect_uia_controls", lambda *args, **kwargs: [])
++    monkeypatch.setattr(probes, "_send_wechat_toggle_hotkey", lambda: events.append("hotkey"))
++
++    result = probes._probe_sessions_after_wakeup(
++        max_controls=12,
++        allow_window_activation=False,
++    )
++
++    assert events == ["find", "wait"]
++    assert result["window"]["visible"] is True
++    assert result["sessions"] == []
++
++
+ def test_pick_tray_badge_click_point_prefers_right_side_taskbar_badge() -> None:
+     icons = [
+         {
